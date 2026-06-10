@@ -2,6 +2,7 @@
 
 #include "core/log.h"
 #include "ipc/ipc_service.h"
+#include "render/animation/animation.h"
 #include "system/day_night_schedule.h"
 #include "wayland/wayland_connection.h"
 #include "wlr-gamma-control-unstable-v1-client-protocol.h"
@@ -19,12 +20,15 @@ namespace {
   constexpr Logger kLog("gamma");
 
   constexpr float kTransitionDurationMs = 1500.0f;
-  constexpr int kTransitionIntervalMs = 100;
   constexpr auto kScheduleRecheckInterval = std::chrono::minutes(1);
 
   const zwlr_gamma_control_v1_listener kGammaControlListener = {
       .gamma_size = &GammaService::onGammaSize,
       .failed = &GammaService::onGammaFailed,
+  };
+
+  const wl_callback_listener kGammaSyncListener = {
+      .done = &GammaService::onGammaSyncDone,
   };
 
 } // namespace
@@ -316,7 +320,7 @@ void GammaService::applyGammaToAll(int kelvin) {
 }
 
 void GammaService::restoreAll() {
-  m_transitionTimer.stop();
+  cancelPendingTick();
   for (auto& og : m_outputs) {
     destroyOutputGamma(og);
   }
@@ -330,6 +334,7 @@ void GammaService::restoreAll() {
 // --- Smooth transitions ---
 
 void GammaService::startTransition(int fromKelvin, int toKelvin) {
+  cancelPendingTick();
   if (fromKelvin < 0) {
     const int dayTemp =
         std::clamp(m_config.dayTemperature, NightLightConfig::kTemperatureMin, NightLightConfig::kTemperatureMax);
@@ -339,7 +344,6 @@ void GammaService::startTransition(int fromKelvin, int toKelvin) {
     applyGammaToAll(fromKelvin);
   }
   if (fromKelvin == toKelvin) {
-    m_transitionTimer.stop();
     m_currentKelvin = toKelvin;
     m_targetKelvin = toKelvin;
     m_transitionFromKelvin = toKelvin;
@@ -354,23 +358,78 @@ void GammaService::startTransition(int fromKelvin, int toKelvin) {
   m_targetKelvin = toKelvin;
   m_transitionProgress = 0.0f;
   m_transitionStart = std::chrono::steady_clock::now();
-  m_transitionTimer.startRepeating(std::chrono::milliseconds(kTransitionIntervalMs), [this]() { tickTransition(); });
+  // Reset telemetry
+  m_syncTelemetry = {};
+  tickTransition();
+}
+
+void GammaService::cancelPendingTick() {
+  m_tickTimer.stop();
+  if (m_gammaSync != nullptr) {
+    wl_callback_destroy(m_gammaSync);
+    m_gammaSync = nullptr;
+  }
+}
+
+// Callback from the compositor when it consumes the gamma message
+void GammaService::onGammaSyncDone(void* data, wl_callback* cb, std::uint32_t) {
+  wl_callback_destroy(cb);
+  auto* self = static_cast<GammaService*>(data);
+  self->m_gammaSync = nullptr;
+
+  // Capture telemetry to understand the compositor sink rate
+  const float roundtripMs =
+      std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - self->m_lastGammaSync).count();
+  self->m_syncTelemetry.syncCount++;
+  self->m_syncTelemetry.totalRoundtripMs += roundtripMs;
+
+  self->tickTransition();
+}
+
+void GammaService::scheduleNextTick(bool useCompositorCallback) {
+  // If we sent a gamma update, schedule the next tick when compositor consumes the update; otherwise, schedule our own
+  // timer.
+  if (useCompositorCallback) {
+    m_lastGammaSync = std::chrono::steady_clock::now();
+    m_gammaSync = wl_display_sync(m_wayland.display());
+    wl_callback_add_listener(m_gammaSync, &kGammaSyncListener, this);
+  } else {
+    m_tickTimer.start(std::chrono::milliseconds(20), [this]() { tickTransition(); });
+  }
+}
+
+void GammaService::logTransitionTelemetry() const {
+  if (m_syncTelemetry.syncCount == 0) {
+    // Probably can't happen, but just to be safe (divide by zero)
+    return;
+  }
+
+  const float avgRoundtripMs = m_syncTelemetry.totalRoundtripMs / static_cast<float>(m_syncTelemetry.syncCount);
+  kLog.info(
+      "transition done: {} ticks, {} syncs, {:.1f}ms avg roundtrip", m_syncTelemetry.tickCount,
+      m_syncTelemetry.syncCount, avgRoundtripMs
+  );
 }
 
 void GammaService::tickTransition() {
+  m_syncTelemetry.tickCount++;
+
   const auto elapsed = std::chrono::steady_clock::now() - m_transitionStart;
   m_transitionProgress = std::min(
       1.0f, static_cast<float>(std::chrono::duration<double, std::milli>(elapsed).count()) / kTransitionDurationMs
   );
+  const auto easeProgress = applyEasing(Easing::EaseInOutCubic, m_transitionProgress);
   const int interpolated = static_cast<int>(
-      std::lerp(static_cast<float>(m_transitionFromKelvin), static_cast<float>(m_targetKelvin), m_transitionProgress)
+      std::lerp(static_cast<float>(m_transitionFromKelvin), static_cast<float>(m_targetKelvin), easeProgress)
   );
-  if (interpolated != m_currentKelvin) {
+
+  // Gamma integer value may not change between ticks when acceleration is low at beginning/end
+  const bool gammaChanged = interpolated != m_currentKelvin;
+  if (gammaChanged) {
     applyGammaToAll(interpolated);
     m_currentKelvin = interpolated;
   }
   if (m_transitionProgress >= 1.0f) {
-    m_transitionTimer.stop();
     if (m_currentKelvin != m_targetKelvin) {
       applyGammaToAll(m_targetKelvin);
     }
@@ -379,11 +438,17 @@ void GammaService::tickTransition() {
       restoreAll();
       m_restoreAfterTransition = false;
     }
+
+    // Transition done (don't schedule a callback)
+    logTransitionTelemetry();
+    return;
   }
+
+  scheduleNextTick(gammaChanged);
 }
 
 void GammaService::stopTransition() {
-  m_transitionTimer.stop();
+  cancelPendingTick();
   if (m_targetKelvin >= 0) {
     applyGammaToAll(m_targetKelvin);
     m_currentKelvin = m_targetKelvin;

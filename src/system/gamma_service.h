@@ -13,6 +13,7 @@
 
 class IpcService;
 class WaylandConnection;
+struct wl_callback;
 struct wl_output;
 struct zwlr_gamma_control_v1;
 
@@ -46,6 +47,7 @@ public:
 
   static void onGammaSize(void* data, zwlr_gamma_control_v1* ctrl, std::uint32_t size);
   static void onGammaFailed(void* data, zwlr_gamma_control_v1* ctrl);
+  static void onGammaSyncDone(void* data, wl_callback* cb, std::uint32_t serial);
 
 private:
   [[nodiscard]] bool effectiveConfiguredEnabled() const;
@@ -77,6 +79,9 @@ private:
   void startTransition(int fromKelvin, int toKelvin);
   void stopTransition();
   void tickTransition();
+  void cancelPendingTick();
+  void scheduleNextTick(bool useCompositorCallback);
+  void logTransitionTelemetry() const;
 
   struct RgbMultipliers {
     double r = 1.0;
@@ -85,6 +90,12 @@ private:
   };
   [[nodiscard]] static RgbMultipliers kelvinToRgb(int kelvin);
   static void fillGammaRamp(std::uint16_t* ramp, std::uint32_t size, const RgbMultipliers& mul);
+
+  struct TransitionTelemetry {
+    int tickCount = 0;
+    int syncCount = 0;
+    float totalRoundtripMs = 0.0f;
+  };
 
   WaylandConnection& m_wayland;
   NightLightConfig m_config;
@@ -103,7 +114,10 @@ private:
   int m_transitionFromKelvin = -1;
   float m_transitionProgress = 0.0f;
   std::chrono::steady_clock::time_point m_transitionStart{};
-  Timer m_transitionTimer;
+  std::chrono::steady_clock::time_point m_lastGammaSync{};
+  wl_callback* m_gammaSync = nullptr;
+  Timer m_tickTimer;
+  TransitionTelemetry m_syncTelemetry;
 
   bool m_restoreAfterTransition = false;
   Timer m_scheduleTimer;
