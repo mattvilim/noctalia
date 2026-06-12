@@ -76,6 +76,7 @@ private:
     std::unique_ptr<LockSurface> surface;
   };
 
+  void dispatchPendingAfterLocked();
   void syncInstances();
   void captureDesktopSnapshots();
   [[nodiscard]] bool shouldUseBlurredDesktop() const;
