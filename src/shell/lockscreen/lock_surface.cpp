@@ -200,7 +200,8 @@ bool LockSurface::passwordFieldContainsPoint(float sceneX, float sceneY) const {
 }
 
 void LockSurface::focusPasswordField() {
-  if (!m_locked || m_blackout || m_passwordField == nullptr) {
+  if (!m_locked || m_blackout || m_passwordField == nullptr || !m_passwordField->enabled()) {
+    // Password field is disabled while PAM auth is in-flight, so block focus
     return;
   }
   m_inputDispatcher.setFocus(m_passwordField->inputArea());
@@ -306,6 +307,21 @@ void LockSurface::setOnPasswordChanged(std::function<void(const std::string&)> o
   m_onPasswordChanged = std::move(onPasswordChanged);
 }
 
+void LockSurface::setInputEnabled(bool enabled) {
+  if (m_passwordField != nullptr) {
+    m_passwordField->setEnabled(enabled);
+  }
+  if (m_loginButton != nullptr) {
+    m_loginButton->setEnabled(enabled);
+  }
+  if (!enabled) {
+    // Drop focus so keyboard events aren't delivered while auth is in flight.
+    m_inputDispatcher.setFocus(nullptr);
+  } else {
+    focusPasswordField();
+  }
+}
+
 void LockSurface::selectAllPassword() {
   if (m_passwordField == nullptr) {
     return;
@@ -378,9 +394,11 @@ void LockSurface::onKeyboardEvent(const KeyboardEvent& event) {
     return;
   }
 
+  // Don't steal focus back to the password field while it's disabled (PAM auth in flight).
   if (m_locked
       && event.pressed
       && m_passwordField != nullptr
+      && m_passwordField->enabled()
       && m_inputDispatcher.focusedArea() != m_passwordField->inputArea()) {
     focusPasswordField();
   }

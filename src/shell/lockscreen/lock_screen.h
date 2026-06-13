@@ -90,11 +90,13 @@ private:
   void resetLockState();
   void clearInstances();
   void updatePromptOnSurfaces();
+  void updateInputEnabledOnSurfaces();
   void handlePasswordEdited(const std::string& value);
   void tryAuthenticate();
   void startFingerprint();
   void stopFingerprint();
   void handleFingerprintStatus(const std::string& message, bool isError);
+  void onAuthResult(PamAuthenticator::Result result);
   static void clearSensitiveString(std::string& value);
 
   WaylandConnection* m_wayland = nullptr;
@@ -105,13 +107,14 @@ private:
   ext_session_lock_v1* m_lock = nullptr;
   std::vector<Instance> m_instances;
   std::unordered_map<wl_output*, ScreencopyImage> m_desktopCaptures;
-  PamAuthenticator m_authenticator;
   std::unique_ptr<FingerprintAuthenticator> m_fingerprint;
   std::string m_user;
   std::string m_password;
   std::string m_status;
   wl_surface* m_pointerSurface = nullptr;
   bool m_statusIsError = false;
+  // Track whether async PAM request is in-flight
+  bool m_pamAuthInFlight = false;
   bool m_lockPending = false;
   bool m_locked = false;
   bool m_desktopCapturesPrimed = false;

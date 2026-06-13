@@ -10,6 +10,6 @@ public:
     std::string message;
   };
 
-  [[nodiscard]] Result authenticateCurrentUser(std::string_view password) const;
+  [[nodiscard]] static Result authenticateCurrentUser(std::string_view password);
   [[nodiscard]] static std::string currentUsername();
 };

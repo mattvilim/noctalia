@@ -96,7 +96,8 @@ namespace {
 
 } // namespace
 
-PamAuthenticator::Result PamAuthenticator::authenticateCurrentUser(std::string_view password) const {
+// Potentially not called from the main thread so should not mutate shared state (class method).
+PamAuthenticator::Result PamAuthenticator::authenticateCurrentUser(std::string_view password) {
   std::string user = currentUsername();
   if (user.empty()) {
     return Result{.success = false, .message = i18n::tr("auth.pam.user-unavailable")};

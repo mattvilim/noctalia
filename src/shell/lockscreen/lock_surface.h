@@ -50,6 +50,7 @@ public:
   [[nodiscard]] bool isBlackout() const noexcept { return m_blackout; }
   void setOnLogin(std::function<void()> onLogin);
   void setOnPasswordChanged(std::function<void(const std::string&)> onPasswordChanged);
+  void setInputEnabled(bool enabled);
   void selectAllPassword();
   void clearPasswordSelection();
   void onThemeChanged();

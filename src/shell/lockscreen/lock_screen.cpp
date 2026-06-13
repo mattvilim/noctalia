@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <string>
+#include <thread>
 #include <wayland-client.h>
 
 namespace {
@@ -609,6 +610,7 @@ void LockScreen::createInstance(const WaylandOutput& output) {
   surface->setOnLogin([this]() { tryAuthenticate(); });
   surface->setOnPasswordChanged([this](const std::string& value) { handlePasswordEdited(value); });
   surface->setPromptState(m_user, m_password, m_status, m_statusIsError);
+  surface->setInputEnabled(!m_pamAuthInFlight);
 
   surface->setBlackout(!isInteractiveOutput(output));
 
@@ -651,6 +653,15 @@ void LockScreen::updatePromptOnSurfaces() {
   }
 }
 
+// Freeze the password field UI for visual indication request is in-flight
+void LockScreen::updateInputEnabledOnSurfaces() {
+  for (auto& instance : m_instances) {
+    if (instance.surface != nullptr) {
+      instance.surface->setInputEnabled(!m_pamAuthInFlight);
+    }
+  }
+}
+
 void LockScreen::handlePasswordEdited(const std::string& value) {
   if (m_password == value && m_status.empty() && !m_statusIsError) {
     return;
@@ -662,13 +673,38 @@ void LockScreen::handlePasswordEdited(const std::string& value) {
 }
 
 void LockScreen::tryAuthenticate() {
+  if (m_pamAuthInFlight) {
+    return;
+  }
+  m_pamAuthInFlight = true;
   m_status = i18n::tr("lockscreen.authenticating");
   m_statusIsError = false;
   updatePromptOnSurfaces();
+  // Important to call this after we set m_pamAuthInFlight
+  updateInputEnabledOnSurfaces();
 
-  const auto result = m_authenticator.authenticateCurrentUser(m_password);
-  clearSensitiveString(m_password);
+  std::string pw = std::move(m_password);
+  m_password.clear();
 
+  // PAM can stall the main thread long enough to freeze the UI, so run it on a
+  // background thread and schedule a callback on the main thread.
+  //
+  // Many distros rate limit PAM with pam_faildelay which causes a UI hang when the password is wrong.
+  std::thread([this, pw = std::move(pw)]() mutable {
+    auto result = PamAuthenticator::authenticateCurrentUser(pw);
+    clearSensitiveString(pw);
+    // Callback is scheduled on the main thread, so shared state is safe
+    DeferredCall::callLater([this, result = std::move(result)]() mutable { onAuthResult(std::move(result)); });
+  }).detach();
+}
+
+void LockScreen::onAuthResult(PamAuthenticator::Result result) {
+  m_pamAuthInFlight = false;
+  updateInputEnabledOnSurfaces();
+
+  if (!isActive()) {
+    return;
+  }
   if (result.success) {
     m_status = i18n::tr("lockscreen.unlocked");
     m_statusIsError = false;
@@ -676,7 +712,6 @@ void LockScreen::tryAuthenticate() {
     unlock();
     return;
   }
-
   m_status = result.message.empty() ? i18n::tr("lockscreen.authentication-failed") : result.message;
   m_statusIsError = true;
   updatePromptOnSurfaces();
