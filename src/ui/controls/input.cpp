@@ -112,8 +112,8 @@ namespace {
     const float inkCenterY = (metrics.top + metrics.bottom) * 0.5f;
     const float rowCenterY = inputHeight * 0.5f;
     glyph.setPosition(cellCenterX - emCenterX, rowCenterY - inkCenterY);
-    // Size the node so animated scale/rotation pivot on the glyph's visual center
-    glyph.setSize(glyphSize, 2.0f * inkCenterY);
+    // The node origin is the glyph baseline, so the ink center is the pivot animated scale/rotation must use.
+    glyph.setTransformOrigin((metrics.left + metrics.right) * 0.5f, inkCenterY);
   }
 
   Color resolved(ColorRole role, float alpha = 1.0f) { return colorForRole(role, alpha); }
@@ -1886,40 +1886,30 @@ void Input::animatePasswordGlyphIn(GlyphNode& glyph) {
   }
 
   constexpr float kStartScale = 0.15f;
-  // The owner is the glyph node, so a backspace that destroys the node auto-cancels this animation.
+  // Fraction of the animation over which the glyph fades in.
+  constexpr float kFadeInFraction = 0.35f;
+  // Three alternating swings (right, left, right), starting and ending at zero rotation.
+  constexpr float kWobbleSwings = 3.0f;
+  constexpr float kWobbleAmplitude = 0.45f; // radians, ~26 degrees
+
   glyph.setOpacity(0.0f);
   glyph.setScale(kStartScale);
   glyph.setRotation(0.0f);
 
   auto* glyphPtr = &glyph;
-  // Linear curve to control curves of each animation knob separately
+  // Driven linearly so each animated property carries its own curve. The owner is the glyph node, so a
+  // backspace that destroys it cancels this animation.
   animations->animate(
       0.0f, 1.0f, static_cast<float>(Style::animNormal), Easing::Linear,
       [glyphPtr](float t) {
-        constexpr float kPi = std::numbers::pi_v<float>;
-
         const float scaleEase = applyEasing(Easing::EaseOutCubic, t);
-        // Ramp initial size to full size
-        const float scale = kStartScale + (1.0f - kStartScale) * scaleEase;
+        glyphPtr->setScale(kStartScale + (1.0f - kStartScale) * scaleEase);
+        glyphPtr->setOpacity(applyEasing(Easing::EaseOutCubic, std::min(1.0f, t / kFadeInFraction)));
 
-        // Clamp opacity ramp from t=0 -> t=0.35
-        const float opacity = applyEasing(Easing::EaseOutCubic, std::min(1.0f, t / 0.35f));
-
-        glyphPtr->setOpacity(opacity);
-        glyphPtr->setScale(scale);
-
-        // The non-random password glyphs have rotational symmetry, so rotation isn't strictly neccesary with
-        // PasswordMaskStyle::CircleFilled. However, leave rotation enabled here in all cases so the pixel snap logic in
-        // cairo_glyph_renderer sees a rotation and disables snapping.
-
-        // TODO: A potential area for improvement is smarter pixel snapping in the renderer. It could maybe recognize
-        // non-unary scale matrix or use animation-aware rendering to disable pixel snapping while animation plays.
-
-        // Wobble sine wave makes three alternating swings (right, left, right), starting and ending at 0 rotation.
-        // Multiplied by an eased decay envelope to attenuate rotation amplitude over time.
+        // Rotation stays on even for the rotationally symmetric circle mask: a non-zero rotation is what makes
+        // the glyph renderer skip pixel snapping, which would otherwise jump the glyph a whole pixel per frame.
         const float wobbleDecay = applyEasing(Easing::EaseOutCubic, 1.0f - t);
-        // Rotation amplitude is 0.45 radians (26 degrees)
-        const float wobble = 0.45f * std::sin(t * 3.0f * kPi) * wobbleDecay;
+        const float wobble = kWobbleAmplitude * std::sin(t * kWobbleSwings * std::numbers::pi_v<float>) * wobbleDecay;
         glyphPtr->setRotation(wobble);
       },
       [glyphPtr]() {
