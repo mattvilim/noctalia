@@ -399,6 +399,7 @@ namespace {
     toml::array actions;
     const auto& source = session.actions.empty() ? defaultSessionPanelActions() : session.actions;
     for (const SessionPanelActionConfig& row : source) {
+      // The greeter has its own firmware-setup button and no consumer for reboot_uefi rows.
       if (!row.enabled || !session_action::isKnown(row.action) || row.action == "reboot_uefi") {
         continue;
       }
